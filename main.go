@@ -24,7 +24,26 @@ type CpuTimesVector struct {
 }
 
 type CPUVector struct {
+	CpuInfo  cpu.InfoStat     `json:"cpu_info"`
 	CpuTimes []CpuTimesVector `json:"cpu_times"`
+}
+
+func getCpuInfo() (CPUVector, error) {
+
+	statInfo, err := cpu.Info()
+	if err != nil {
+		fmt.Println("no CPU information found", err)
+		return CPUVector{}, err
+	}
+
+	if len(statInfo) == 0 {
+		return CPUVector{}, fmt.Errorf("no CPU information found")
+	}
+
+	return CPUVector{
+		CpuInfo: statInfo[0],
+	}, nil
+
 }
 
 func getTimesVector(duration time.Duration, interval time.Duration, startTime time.Time) (CPUVector, error) {
@@ -53,6 +72,7 @@ MainLoop:
 
 			fmt.Println("starting new operation")
 
+			// время работы CPU по каждому ядру отдельно (true)
 			statTimes, err := cpu.Times(true)
 			if err != nil {
 				fmt.Println("failed to read CPU times:", err)
@@ -120,8 +140,9 @@ func metricJSON(cpuVector CPUVector) {
 	if err != nil {
 		fmt.Println("failed to write metric.json:", err)
 		return
-
 	}
+
+	fmt.Println("Metrics saved to metric/metric.json")
 }
 
 func main() {
@@ -132,10 +153,18 @@ func main() {
 	duration := 1 * time.Minute
 	interval := 2 * time.Second
 
-	cpuVector, err := getTimesVector(duration, interval, startTime)
+	cpuTimeVector, err := getTimesVector(duration, interval, startTime)
 	if err != nil {
 		fmt.Println("failed to collect CPU times:", err)
 		return
+	}
+	cpuInfo, err := getCpuInfo()
+	if err != nil {
+		fmt.Println("faild to get CPU info:", err)
+	}
+	cpuVector := CPUVector{
+		CpuInfo:  cpuInfo.CpuInfo,
+		CpuTimes: cpuTimeVector.CpuTimes,
 	}
 
 	metricJSON(cpuVector)
