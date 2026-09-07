@@ -67,35 +67,16 @@ func streamCpuTimes(ctx context.Context, interval time.Duration, ch chan<- TimeE
 	}
 }
 
-func metricJSON(entry TimeEntry) {
+func metricJSON(file *os.File, entry TimeEntry) {
 
-	jsData, err := json.Marshal(entry)
-	if err != nil {
-		fmt.Println("failed to create JSON:", err)
-		return
-	}
+	encoder := json.NewEncoder(file)
 
-	err = os.MkdirAll("metrics", 0755)
-	if err != nil {
-		fmt.Println("failed to create metrics directory:", err)
-		return
-	}
-
-	file, err := os.OpenFile("metrics/metric.json", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		fmt.Println("failed to open file:", err)
-		return
-	}
-	defer file.Close()
-
-	if _, err := file.Write(append(jsData, '\n')); err != nil {
-		fmt.Println("failed to write to file:", err)
+	if err := encoder.Encode(entry); err != nil {
+		fmt.Println("failed to encode and write JSON:", err)
 	}
 }
 
 func main() {
-
-	timesChan := make(chan TimeEntry)
 
 	cpuInfo, err := getCpuInfo()
 	if err != nil {
@@ -104,7 +85,20 @@ func main() {
 	}
 
 	fmt.Printf("Started collection for: %s\n", cpuInfo.ModelName)
-	fmt.Println("Press [ENTER] at any time to stop the program...")
+
+	if err := os.MkdirAll("metrics", 0755); err != nil {
+		fmt.Println("failed to create metrics directory:", err)
+		return
+	}
+
+	file, err := os.OpenFile("metrics/metric.json", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Println("failde to open file", err)
+		return
+	}
+	defer file.Close()
+
+	timesChan := make(chan TimeEntry)
 
 	//ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -113,6 +107,8 @@ func main() {
 	interval := 1 * time.Second
 
 	go streamCpuTimes(ctx, interval, timesChan)
+
+	fmt.Println("Press [ENTER] at any time to stop the program...")
 
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
@@ -123,7 +119,7 @@ func main() {
 	}()
 
 	for currentEntry := range timesChan {
-		metricJSON(currentEntry)
+		metricJSON(file, currentEntry)
 		fmt.Printf("[Record]: Added vector for %s\n", currentEntry.Timestamp)
 	}
 
