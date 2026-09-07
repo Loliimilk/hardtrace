@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,122 +11,65 @@ import (
 	"github.com/shirou/gopsutil/cpu"
 )
 
-type CpuTimesVector struct {
-	CPU       string    `json:"cpu"`
-	User      []float64 `json:"user"`
-	System    []float64 `json:"system"`
-	Idle      []float64 `json:"idle"`
-	Nice      []float64 `json:"nice"`
-	Iowait    []float64 `json:"iowait"`
-	Irq       []float64 `json:"irq"`
-	Softirq   []float64 `json:"softirq"`
-	Steal     []float64 `json:"steal"`
-	Guest     []float64 `json:"guest"`
-	GuestNice []float64 `json:"guest_nice"`
+type TimeEntry struct {
+	Timestamp string          `json:"timestamp"`
+	CpuTimes  []cpu.TimesStat `json:"cpu_times"`
 }
 
-type CPUVector struct {
-	CpuInfo  cpu.InfoStat     `json:"cpu_info"`
-	CpuTimes []CpuTimesVector `json:"cpu_times"`
-}
-
-func getCpuInfo() (CPUVector, error) {
+func getCpuInfo() (cpu.InfoStat, error) {
 
 	statInfo, err := cpu.Info()
 	if err != nil {
-		fmt.Println("no CPU information found", err)
-		return CPUVector{}, err
+		return cpu.InfoStat{}, err
 	}
 
 	if len(statInfo) == 0 {
-		return CPUVector{}, fmt.Errorf("no CPU information found")
+		return cpu.InfoStat{}, fmt.Errorf("no CPU information found")
 	}
 
-	return CPUVector{
-		CpuInfo: statInfo[0],
-	}, nil
+	return statInfo[0], nil
 
 }
 
-func getTimesVector(duration time.Duration, interval time.Duration, startTime time.Time) (CPUVector, error) {
-	var cpuDataTimes []CpuTimesVector
+func streamCpuTimes(ctx context.Context, interval time.Duration, ch chan<- TimeEntry) {
 
-	stopTimer := time.After(duration)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	defer close(ch)
 
-MainLoop:
 	for {
-
 		select {
 
-		case <-stopTimer:
+		case <-ctx.Done():
+			fmt.Println("[Goroutine]: Received stop signal. Stopping metric collection...")
+			return
 
-			fmt.Println("collection time is over")
-
-			endTime := time.Now()
-
-			timeDuration := endTime.Sub(startTime)
-
-			fmt.Printf("Finished at: %s\n", endTime.Format("2006-01-02 15:04:05"))
-			fmt.Printf("Total runtime: %s\n", timeDuration.Round(time.Minute))
-			break MainLoop
-
-		default:
-
-			fmt.Println("starting new operation")
-
-			// время работы CPU по каждому ядру отдельно (true)
+		case <-ticker.C:
+			fmt.Println("\n[Goroutine]: Taking a new CPU measurement...")
 			statTimes, err := cpu.Times(true)
 			if err != nil {
 				fmt.Println("failed to read CPU times:", err)
-				return CPUVector{}, err
+				continue
 			}
 
-			if len(cpuDataTimes) == 0 {
-				for _, stat := range statTimes {
-					cpuDataTimes = append(cpuDataTimes, CpuTimesVector{
-						CPU:       stat.CPU,
-						User:      []float64{},
-						System:    []float64{},
-						Idle:      []float64{},
-						Nice:      []float64{},
-						Iowait:    []float64{},
-						Irq:       []float64{},
-						Softirq:   []float64{},
-						Steal:     []float64{},
-						Guest:     []float64{},
-						GuestNice: []float64{},
-					})
-				}
+			entry := TimeEntry{
+				Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+				CpuTimes:  statTimes,
 			}
 
-			for i, stat := range statTimes {
-
-				cpuDataTimes[i].User = append(cpuDataTimes[i].User, stat.User)
-				cpuDataTimes[i].System = append(cpuDataTimes[i].System, stat.System)
-				cpuDataTimes[i].Idle = append(cpuDataTimes[i].Idle, stat.Idle)
-				cpuDataTimes[i].Nice = append(cpuDataTimes[i].Nice, stat.Nice)
-				cpuDataTimes[i].Iowait = append(cpuDataTimes[i].Iowait, stat.Iowait)
-				cpuDataTimes[i].Irq = append(cpuDataTimes[i].Irq, stat.Irq)
-				cpuDataTimes[i].Softirq = append(cpuDataTimes[i].Softirq, stat.Softirq)
-				cpuDataTimes[i].Steal = append(cpuDataTimes[i].Steal, stat.Steal)
-				cpuDataTimes[i].Guest = append(cpuDataTimes[i].Guest, stat.Guest)
-				cpuDataTimes[i].GuestNice = append(cpuDataTimes[i].GuestNice, stat.GuestNice)
-
+			select {
+			case ch <- entry:
+			case <-ctx.Done():
+				return
 			}
-			time.Sleep(interval)
-
 		}
+
 	}
-
-	return CPUVector{
-		CpuTimes: cpuDataTimes,
-	}, nil
-
 }
 
-func metricJSON(cpuVector CPUVector) {
+func metricJSON(entry TimeEntry) {
 
-	jsData, err := json.MarshalIndent(cpuVector, "", " ")
+	jsData, err := json.Marshal(entry)
 	if err != nil {
 		fmt.Println("failed to create JSON:", err)
 		return
@@ -136,37 +81,51 @@ func metricJSON(cpuVector CPUVector) {
 		return
 	}
 
-	err = os.WriteFile("metrics/metric.json", jsData, 0644)
+	file, err := os.OpenFile("metrics/metric.json", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		fmt.Println("failed to write metric.json:", err)
+		fmt.Println("failed to open file:", err)
 		return
 	}
+	defer file.Close()
 
-	fmt.Println("Metrics saved to metric/metric.json")
+	if _, err := file.Write(append(jsData, '\n')); err != nil {
+		fmt.Println("failed to write to file:", err)
+	}
 }
 
 func main() {
 
-	startTime := time.Now()
-	fmt.Printf("Started at: %s\n", startTime.Format("2006-01-02 15:04:05"))
+	timesChan := make(chan TimeEntry)
 
-	duration := 1 * time.Minute
-	interval := 2 * time.Second
-
-	cpuTimeVector, err := getTimesVector(duration, interval, startTime)
-	if err != nil {
-		fmt.Println("failed to collect CPU times:", err)
-		return
-	}
 	cpuInfo, err := getCpuInfo()
 	if err != nil {
-		fmt.Println("faild to get CPU info:", err)
-	}
-	cpuVector := CPUVector{
-		CpuInfo:  cpuInfo.CpuInfo,
-		CpuTimes: cpuTimeVector.CpuTimes,
+		fmt.Println("failed to get CPU info:", err)
+		return
 	}
 
-	metricJSON(cpuVector)
+	fmt.Printf("Started collection for: %s\n", cpuInfo.ModelName)
+	fmt.Println("Press [ENTER] at any time to stop the program...")
 
+	//ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	interval := 1 * time.Second
+
+	go streamCpuTimes(ctx, interval, timesChan)
+
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			fmt.Println("\n[Main]: User input detected! Signaling cancellation...")
+			cancel()
+		}
+	}()
+
+	for currentEntry := range timesChan {
+		metricJSON(currentEntry)
+		fmt.Printf("[Record]: Added vector for %s\n", currentEntry.Timestamp)
+	}
+
+	fmt.Println("Program completed successfully.")
 }
